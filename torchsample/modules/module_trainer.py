@@ -17,6 +17,7 @@ from torch.utils.data import Dataset, TensorDataset, DataLoader
 from ..callbacks import CallbackModule, History, TQDM
 from ..constraints import ConstraintModule
 from ..regularizers import RegularizerModule
+from ..metrics import MetricsModule
 
 
 class ModuleTrainer():
@@ -38,6 +39,7 @@ class ModuleTrainer():
         self._callbacks = [self.history]
         self._constraints = []
         self._regularizers = []
+        self._metrics = []
         self.stop_training = False
 
     def set_loss(self, loss):
@@ -58,6 +60,9 @@ class ModuleTrainer():
 
     def set_callbacks(self, callbacks):
         self._callbacks += callbacks
+        
+    def set_metrics(self, metrics):
+        self._metrics = metrics
 
     def fit(self,
             x, 
@@ -133,6 +138,7 @@ class ModuleTrainer():
                 'nb_epoch': nb_epoch
             }
             callbacks.on_epoch_begin(epoch_idx, epoch_logs)
+            batch_metrics = MetricsModule(self._metrics)
 
             for batch_idx,(x_batch, y_batch) in enumerate(loader):
                 batch_logs = {
@@ -157,6 +163,9 @@ class ModuleTrainer():
                     loss += reg_loss
                     batch_logs['reg_loss'] = reg_loss
                 batch_logs['loss'] = loss.data[0]
+                
+                batch_metrics.update(outputs.data, targets.data)
+                batch_logs.update(batch_metrics.get_logs())
 
                 # make backward pass
                 loss.backward()
@@ -167,14 +176,16 @@ class ModuleTrainer():
                 constraints.on_batch_end(batch_idx)
 
             if val_loader is not None:
-                val_loss = self.evaluate_loader(val_loader, self._loss)
-                epoch_logs['val_loss'] = val_loss
+                val_metrics = MetricsModule(self._metrics)
+                val_loss = self.evaluate_loader(val_loader, val_metrics)
+                epoch_logs.update(val_metrics.get_logs(prefix = 'val_'))
+                
+            epoch_logs.update(batch_metrics.get_logs())
+                
             epoch_logs['loss'] = self.history.loss / self.history.samples_seen
             if regularizers is not None:
                 epoch_logs['reg_loss'] = self.history.reg_loss / self.history.samples_seen
                 
-            epoch_logs['val_acc'] = 0.0
-
             callbacks.on_epoch_end(epoch_idx, epoch_logs)
             constraints.on_epoch_end(epoch_idx)
             if self.stop_training:
@@ -223,10 +234,10 @@ class ModuleTrainer():
                  verbose=1):
         dataset = TensorDataset(x,y)
         loader = DataLoader(dataset, batch_size=batch_size)
-        loss = self.evaluate_loader(loader, self._loss)
+        loss = self.evaluate_loader(loader)
         return loss
 
-    def evaluate_loader(self, loader, loss_f):
+    def evaluate_loader(self, loader, metrics = MetricsModule([])):
         self._model.eval()
         total_loss = 0.
         total_samples = 0.
@@ -238,9 +249,11 @@ class ModuleTrainer():
             y_batch = Variable(y_batch, volatile=True)
 
             y_pred = self._model(x_batch)
-            loss = loss_f(y_pred, y_batch)
+            loss = self._loss(y_pred, y_batch)
             total_loss += loss.data[0]*len(x_batch)
             total_samples += len(x_batch)
+            
+            metrics.update(y_pred.data, y_batch.data)
         self._model.train()
         return total_loss / total_samples
 
