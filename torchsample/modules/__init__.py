@@ -1,3 +1,3 @@
 from __future__ import absolute_import
 
-from .super_module import *
+from .module_trainer import *

@@ -34,9 +34,9 @@ class CallbackModule(object):
         for callback in self.callbacks:
             callback.set_params(params)
 
-    def set_model(self, model):
+    def set_model(self, model, trainer):
         for callback in self.callbacks:
-            callback.set_model(model)
+            callback.set_model(model, trainer)
 
     def on_epoch_begin(self, epoch, logs=None):
         logs = logs or {}
@@ -80,8 +80,9 @@ class Callback(object):
     def set_params(self, params):
         self.params = params
 
-    def set_model(self, model):
+    def set_model(self, model, trainer):
         self.model = model
+        self.trainer = trainer
 
     def on_epoch_begin(self, epoch, logs=None):
         pass
@@ -120,15 +121,8 @@ class TQDM(Callback):
                         (epoch+1, logs['nb_epoch']))
 
     def on_epoch_end(self, epoch, logs=None):
-        if 'val_loss' in logs:
-            self.progbar.set_postfix({
-                'Loss': '%.04f' % logs['loss'],
-                'Val_Loss': '%.04f' % (logs['val_loss'])
-                })
-        else:
-            self.progbar.set_postfix({
-                'Loss': '%.04f' % logs['loss']
-                })
+        log_data = {key: '%.04f' % value for (key, value) in logs.items() if not key.startswith('nb_')}
+        self.progbar.set_postfix(log_data)
         self.progbar.update()
         self.progbar.close()
 
@@ -138,7 +132,7 @@ class TQDM(Callback):
     def on_batch_end(self, batch, logs=None):
         self.progbar.set_postfix({
             'Loss': '%.04f' % 
-            (self.model.history.loss / self.model.history.samples_seen)})
+            (self.trainer.history.loss / self.trainer.history.samples_seen)})
 
 
 class History(Callback):
@@ -241,7 +235,7 @@ class ModelCheckpoint(Callback):
                         print('\nEpoch %i: improved from %0.4f to %0.4f saving model to %s' % 
                               (epoch+1, self.best_loss, current_loss, file))
                     self.best_loss = current_loss
-                    self.model.save_state_dict(file)
+                    self.trainer.save_state_dict(file)
                     if self.max_checkpoints > 0:
                         if len(self.old_files) == self.max_checkpoints:
                             try:
@@ -253,7 +247,7 @@ class ModelCheckpoint(Callback):
         else:
             if self.verbose > 0:
                 print('\nEpoch %i: saving model to %s' % (epoch+1, file))
-            self.model.save_state_dict(file)
+            self.trainer.save_state_dict(file)
             if self.max_checkpoints > 0:
                 if len(self.old_files) == self.max_checkpoints:
                     try:
@@ -312,7 +306,7 @@ class EarlyStopping(Callback):
             else:
                 if self.wait >= self.patience:
                     self.stopped_epoch = epoch + 1
-                    self.model.stop_training = True
+                    self.trainer.stop_training = True
                 self.wait += 1
 
     def on_train_end(self, logs):

@@ -1,5 +1,5 @@
 """
-SuperModule for high level training on Pytorch models
+ModuleTrainer for high level training on Pytorch models
 """
 from __future__ import print_function
 from __future__ import absolute_import
@@ -9,39 +9,36 @@ import math
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, TensorDataset, DataLoader
+
 
 # local imports
-from ..datasets import TensorDataset
+# from ..datasets import TensorDataset
 from ..callbacks import CallbackModule, History, TQDM
 from ..constraints import ConstraintModule
 from ..regularizers import RegularizerModule
 
 
-class SuperModule(nn.Module):
+class ModuleTrainer():
 
-    def __init__(self):
+    def __init__(self, model, use_cuda):
         """
-        SuperModule for high-level training of Pytorch models
+        ModuleTrainer for high-level training of Pytorch models
 
         TODO:
             - allow metrics
                 - e.g. for validation accuracy instead of loss
         """
-        super(SuperModule, self).__init__()
+        super(ModuleTrainer, self).__init__()
+        
+        self._model = model
+        self.use_cuda = use_cuda
 
         self.history = History()
         self._callbacks = [self.history]
         self._constraints = []
         self._regularizers = []
         self.stop_training = False
-
-    def forward(self, *input):
-        """
-        Defines the computation performed at every call.
-        Should be overriden by all subclasses.
-        """
-        raise NotImplementedError('Subclass must implement this method')
 
     def set_loss(self, loss):
         self._loss = loss
@@ -50,7 +47,7 @@ class SuperModule(nn.Module):
         if 'parameters' in kwargs:
             parameters = kwargs['parameters']
         else:
-            parameters = self.parameters()
+            parameters = self._model.parameters()
         self._optimizer = optimizer(parameters, **kwargs)
 
     def set_regularizers(self, regularizers):
@@ -68,28 +65,32 @@ class SuperModule(nn.Module):
             validation_data=None, 
             nb_epoch=100, 
             batch_size=32, 
-            verbose=1):
+            verbose=1,
+            pin_memory=False):
         """
         Fit a model on torch tensors
         """
         train_dataset = TensorDataset(x, y)
-        train_loader = DataLoader(train_dataset, batch_size=batch_size)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, pin_memory=pin_memory)
         if validation_data is not None:
             test_dataset = TensorDataset(validation_data[0], validation_data[1])
-            val_loader = DataLoader(test_dataset, batch_size=batch_size)
+            val_loader = DataLoader(test_dataset, batch_size=batch_size, pin_memory=pin_memory)
         else:
             val_loader = None
         self.fit_loader(loader=train_loader, val_loader=val_loader,
                         nb_epoch=nb_epoch, verbose=verbose)
 
     def fit_on_batch(self, x, y):
+        if self.use_cuda:
+            x = x.cuda()
+            y = y.cuda()
         inputs = Variable(x)
         targets = Variable(y)
 
         # zero the gradients
         self._optimizer.zero_grad()
         # make forward pass
-        outputs = self(inputs)
+        outputs = self._model(inputs)
         # compute model loss
         loss = self._loss(outputs, targets)
         reg_loss = self._regularizers.compute_loss()
@@ -110,25 +111,25 @@ class SuperModule(nn.Module):
         ## create regularizers
         if len(self._regularizers) > 0:
             regularizers = RegularizerModule(self._regularizers)
-            regularizers.set_model(self)
+            regularizers.set_model(self._model)
         else:
             regularizers = None
 
         ## create constraints
         constraints = ConstraintModule(self._constraints)
-        constraints.set_model(self)
+        constraints.set_model(self._model)
 
         ## create callbacks
         if verbose > 0:
             self._callbacks += [TQDM()]
         callbacks = CallbackModule(self._callbacks)
-        callbacks.set_model(self)
+        callbacks.set_model(self._model, self)
 
         callbacks.on_train_begin()
 
         for epoch_idx in range(nb_epoch):
             epoch_logs = {
-                'nb_batches': int(math.ceil(len(loader.dataset.inputs)/loader.batch_size)),
+                'nb_batches': int(math.ceil(len(loader.dataset.data_tensor)/loader.batch_size)),
                 'nb_epoch': nb_epoch
             }
             callbacks.on_epoch_begin(epoch_idx, epoch_logs)
@@ -140,11 +141,15 @@ class SuperModule(nn.Module):
                 }                
                 callbacks.on_batch_begin(batch_idx, batch_logs)
 
+                if self.use_cuda:
+                    x_batch = x_batch.cuda()
+                    y_batch = y_batch.cuda()
+
                 inputs = Variable(x_batch)
                 targets = Variable(y_batch)
 
                 self._optimizer.zero_grad()
-                outputs = self(inputs)
+                outputs = self._model(inputs)
                 loss = self._loss(outputs, targets)
                 
                 if regularizers is not None:
@@ -162,11 +167,13 @@ class SuperModule(nn.Module):
                 constraints.on_batch_end(batch_idx)
 
             if val_loader is not None:
-                val_loss = self.evaluate_loader(val_loader)
+                val_loss = self.evaluate_loader(val_loader, self._loss)
                 epoch_logs['val_loss'] = val_loss
             epoch_logs['loss'] = self.history.loss / self.history.samples_seen
             if regularizers is not None:
                 epoch_logs['reg_loss'] = self.history.reg_loss / self.history.samples_seen
+                
+            epoch_logs['val_acc'] = 0.0
 
             callbacks.on_epoch_end(epoch_idx, epoch_logs)
             constraints.on_epoch_end(epoch_idx)
@@ -187,22 +194,26 @@ class SuperModule(nn.Module):
     def predict_loader(self,
                        loader,
                        verbose=1):
-        self.eval()
+        self._model.eval()
         preds = []
         for batch_idx, batch in enumerate(loader):
             if loader.dataset.has_target:
                 batch = batch[0]
-            x_batch = Variable(batch)
-            batch_pred = self(x_batch)
+            if self.use_cuda:
+                batch = batch.cuda()
+            x_batch = Variable(batch, volatile=True)
+            batch_pred = self._model(x_batch)
             preds.append(batch_pred.data)
-        self.train()
-        return Variable(torch.cat(preds))
+        self._model.train()
+        return Variable(torch.cat(preds), volatile=True)
 
     def predict_on_batch(self, x):
-        self.eval()
-        x = Variable(x)
-        preds = self(x)
-        self.train()
+        self._model.eval()
+        if self.use_cuda:
+            x = x.cuda()
+        x = Variable(x, volatile=True)
+        preds = self._model(x)
+        self._model.train()
         return preds
 
     def evaluate(self, 
@@ -212,31 +223,37 @@ class SuperModule(nn.Module):
                  verbose=1):
         dataset = TensorDataset(x,y)
         loader = DataLoader(dataset, batch_size=batch_size)
-        loss = self.evaluate_loader(loader)
+        loss = self.evaluate_loader(loader, self._loss)
         return loss
 
-    def evaluate_loader(self, loader):
-        self.eval()
+    def evaluate_loader(self, loader, loss_f):
+        self._model.eval()
         total_loss = 0.
         total_samples = 0.
         for batch_idx, (x_batch, y_batch) in enumerate(loader):
-            x_batch = Variable(x_batch)
-            y_batch = Variable(y_batch)
+            if self.use_cuda:
+                x_batch = x_batch.cuda()
+                y_batch = y_batch.cuda()
+            x_batch = Variable(x_batch, volatile=True)
+            y_batch = Variable(y_batch, volatile=True)
 
-            y_pred = self(x_batch)
-            loss = self._loss(y_pred, y_batch)
+            y_pred = self._model(x_batch)
+            loss = loss_f(y_pred, y_batch)
             total_loss += loss.data[0]*len(x_batch)
             total_samples += len(x_batch)
-        self.train()
+        self._model.train()
         return total_loss / total_samples
 
     def evaluate_on_batch(self, x, y):
-        self.eval()
-        x = Variable(x)
-        y = Variable(y)
-        y_pred = self(y)
+        self._model.eval()
+        if self.use_cuda:
+            x = x.cuda()
+            y = y.cuda()
+        x = Variable(x, volatile=True)
+        y = Variable(y, volatile=True)
+        y_pred = self._model(y)
         loss = self._loss(y_pred, y)
-        self.train()
+        self._model.train()
         return loss.data[0]
 
     def save_state_dict(self, file):
@@ -244,17 +261,5 @@ class SuperModule(nn.Module):
         Save a model parameters to disk
         """
         # model parameters -> ordered dict
-        state_dict = self.state_dict()
+        state_dict = self._model.state_dict()
         torch.save(state_dict, file)
-
-
-
-
-
-
-
-
-
-
-
-
