@@ -197,7 +197,8 @@ class ModuleTrainer():
                 x, 
                 batch_size=32, 
                 verbose=1):
-        dataset = TensorDataset(x)
+        y_unused = torch.Tensor(x.size(0))
+        dataset = TensorDataset(x, y_unused)
         loader = DataLoader(dataset, batch_size=batch_size)
         preds = self.predict_loader(loader, verbose=verbose)
         return preds
