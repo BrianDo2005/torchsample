@@ -207,9 +207,7 @@ class ModuleTrainer():
                        verbose=1):
         self._model.eval()
         preds = []
-        for batch_idx, batch in enumerate(loader):
-            if loader.dataset.has_target:
-                batch = batch[0]
+        for batch_idx, (batch, target_unused) in enumerate(loader):
             if self.use_cuda:
                 batch = batch.cuda()
             x_batch = Variable(batch, volatile=True)
