@@ -125,71 +125,74 @@ class ModuleTrainer():
         constraints.set_model(self._model)
 
         ## create callbacks
-        if verbose > 0:
-            self._callbacks += [TQDM()]
-        callbacks = CallbackModule(self._callbacks)
-        callbacks.set_model(self._model, self)
+        
+        with TQDM() as pbar:
+            progressbar = []
+            if verbose > 0:
+                progressbar += [pbar]
+            callbacks = CallbackModule(self._callbacks + progressbar)
+            callbacks.set_model(self._model, self)
 
-        callbacks.on_train_begin()
+            callbacks.on_train_begin()
 
-        for epoch_idx in range(nb_epoch):
-            epoch_logs = {
-                'nb_batches': int(math.ceil(len(loader.dataset.data_tensor)/loader.batch_size)),
-                'nb_epoch': nb_epoch
-            }
-            callbacks.on_epoch_begin(epoch_idx, epoch_logs)
-            batch_metrics = MetricsModule(self._metrics)
+            for epoch_idx in range(nb_epoch):
+                epoch_logs = {
+                    'nb_batches': int(math.ceil(len(loader.dataset.data_tensor)/loader.batch_size)),
+                    'nb_epoch': nb_epoch
+                }
+                callbacks.on_epoch_begin(epoch_idx, epoch_logs)
+                batch_metrics = MetricsModule(self._metrics)
 
-            for batch_idx,(x_batch, y_batch) in enumerate(loader):
-                batch_logs = {
-                    'batch_idx': batch_idx,
-                    'batch_samples': len(x_batch)
-                }                
-                callbacks.on_batch_begin(batch_idx, batch_logs)
+                for batch_idx,(x_batch, y_batch) in enumerate(loader):
+                    batch_logs = {
+                        'batch_idx': batch_idx,
+                        'batch_samples': len(x_batch)
+                    }                
+                    callbacks.on_batch_begin(batch_idx, batch_logs)
 
-                if self.use_cuda:
-                    x_batch = x_batch.cuda()
-                    y_batch = y_batch.cuda()
+                    if self.use_cuda:
+                        x_batch = x_batch.cuda()
+                        y_batch = y_batch.cuda()
 
-                inputs = Variable(x_batch)
-                targets = Variable(y_batch)
+                    inputs = Variable(x_batch)
+                    targets = Variable(y_batch)
 
-                self._optimizer.zero_grad()
-                outputs = self._model(inputs)
-                loss = self._loss(outputs, targets)
+                    self._optimizer.zero_grad()
+                    outputs = self._model(inputs)
+                    loss = self._loss(outputs, targets)
                 
+                    if regularizers is not None:
+                        reg_loss = regularizers.compute_loss()
+                        loss += reg_loss
+                        batch_logs['reg_loss'] = reg_loss
+                    batch_logs['loss'] = loss.data[0]
+                
+                    batch_metrics.update(outputs.data, targets.data)
+                    batch_logs.update(batch_metrics.get_logs())
+
+                    # make backward pass
+                    loss.backward()
+                    # make optimizer step to update weights
+                    self._optimizer.step()
+
+                    callbacks.on_batch_end(batch_idx, batch_logs)
+                    constraints.on_batch_end(batch_idx)
+
+                if val_loader is not None:
+                    val_metrics = MetricsModule(self._metrics)
+                    val_loss = self.evaluate_loader(val_loader, val_metrics)
+                    epoch_logs.update(val_metrics.get_logs(prefix = 'val_'))
+                
+                epoch_logs.update(batch_metrics.get_logs())
+                
+                epoch_logs['loss'] = self.history.loss / self.history.samples_seen
                 if regularizers is not None:
-                    reg_loss = regularizers.compute_loss()
-                    loss += reg_loss
-                    batch_logs['reg_loss'] = reg_loss
-                batch_logs['loss'] = loss.data[0]
+                    epoch_logs['reg_loss'] = self.history.reg_loss / self.history.samples_seen
                 
-                batch_metrics.update(outputs.data, targets.data)
-                batch_logs.update(batch_metrics.get_logs())
-
-                # make backward pass
-                loss.backward()
-                # make optimizer step to update weights
-                self._optimizer.step()
-
-                callbacks.on_batch_end(batch_idx, batch_logs)
-                constraints.on_batch_end(batch_idx)
-
-            if val_loader is not None:
-                val_metrics = MetricsModule(self._metrics)
-                val_loss = self.evaluate_loader(val_loader, val_metrics)
-                epoch_logs.update(val_metrics.get_logs(prefix = 'val_'))
-                
-            epoch_logs.update(batch_metrics.get_logs())
-                
-            epoch_logs['loss'] = self.history.loss / self.history.samples_seen
-            if regularizers is not None:
-                epoch_logs['reg_loss'] = self.history.reg_loss / self.history.samples_seen
-                
-            callbacks.on_epoch_end(epoch_idx, epoch_logs)
-            constraints.on_epoch_end(epoch_idx)
-            if self.stop_training:
-                break
+                callbacks.on_epoch_end(epoch_idx, epoch_logs)
+                constraints.on_epoch_end(epoch_idx)
+                if self.stop_training:
+                    break
 
         callbacks.on_train_end()
 
