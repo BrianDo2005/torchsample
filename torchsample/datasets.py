@@ -9,7 +9,13 @@ import fnmatch
 import numpy as np
 import pandas as pd
 import PIL.Image as Image
-import nibabel
+
+import warnings
+
+try:
+    import nibabel
+except:
+    warnings.warn('Cant import nibabel.. Cant load brain images')
 
 import torch as th
 

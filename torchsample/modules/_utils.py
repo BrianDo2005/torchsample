@@ -11,7 +11,7 @@ except:
 import torch.nn.functional as F
 import torch.optim as optim
 
-from ..metrics import Metric, CategoricalAccuracy, BinaryAccuracy
+from ..metrics import Metric, CategoricalAccuracy, BinaryAccuracy, EmptyMetric
 from ..initializers import GeneralInitializer
 
 def _add_regularizer_to_loss_fn(loss_fn, 
@@ -28,8 +28,8 @@ def _is_tuple_or_list(x):
 def _parse_num_inputs_and_targets_from_loader(loader):
     """ NOT IMPLEMENTED """
     #batch = next(iter(loader))
-    num_inputs = loader.dataset.num_inputs
-    num_targets = loader.dataset.num_targets
+    num_inputs = 1 # TODO
+    num_targets = 1
     return num_inputs, num_targets
 
 def _parse_num_inputs_and_targets(inputs, targets=None):
@@ -63,11 +63,13 @@ def _validate_metric_input(metric):
         elif metric.upper() == 'BINARY_ACCURACY':
             return BinaryAccuracy()
         else:
-            raise ValueError('Invalid metric string input - must match pytorch function.')
+            raise ValueError('Invalid metric string input - must match pytorch function.', metric)
     elif isinstance(metric, Metric):
         return metric
+    elif metric is None:
+        return EmptyMetric()
     else:
-        raise ValueError('Invalid metric input')
+        raise ValueError('Invalid metric input', metric)
 
 def _validate_loss_input(loss):
     dir_f = dir(F)

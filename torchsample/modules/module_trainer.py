@@ -72,6 +72,9 @@ class ModuleTrainer(object):
         # losses
         self._loss = None
         self._loss_fn = None
+        
+        # loss_weights
+        self._loss_weights = None
 
         # other properties
         self._stop_training = False
@@ -144,7 +147,8 @@ class ModuleTrainer(object):
                 initializers=None,
                 constraints=None,
                 metrics=None,
-                transforms=None):
+                transforms=None,
+                loss_weights=None):
         self.set_optimizer(optimizer)
         self.set_loss(loss)
 
@@ -184,6 +188,9 @@ class ModuleTrainer(object):
             self.set_transforms(transforms)
         else:
             self._has_transforms = False
+        
+        # TODO validation    
+        self._loss_weights = loss_weights
 
     def fit(self,
             inputs,
@@ -217,7 +224,7 @@ class ModuleTrainer(object):
         # ----------------------------------------------------------------------
 
         fit_helper = _get_helper(self, num_inputs, num_targets)
-        fit_loss_fn = fit_helper.get_partial_loss_fn(self._loss_fn)
+        fit_loss_fn = fit_helper.get_partial_loss_fn(self._loss_fn, self._loss_weights)
         fit_forward_fn = fit_helper.get_partial_forward_fn(self.model)
 
         with TQDM() as pbar:
@@ -263,7 +270,7 @@ class ModuleTrainer(object):
                     # ---------------------------------------------
                     self._optimizer.zero_grad()
                     output_batch = fit_forward_fn(input_batch)
-                    loss = fit_loss_fn(output_batch, target_batch)
+                    loss, losses = fit_loss_fn(output_batch, target_batch)
                     loss.backward()
                     self._optimizer.step()
                     # ---------------------------------------------
@@ -275,6 +282,9 @@ class ModuleTrainer(object):
                         batch_logs.update(metrics_logs)
 
                     batch_logs['loss'] = loss.data[0]
+                    # TODO print metrics when there are multiple losses only
+                    for i, loss_i in enumerate(losses):
+                        batch_logs['loss_' + str(i)] = loss_i.data[0]
                     callback_container.on_batch_end(batch_idx, batch_logs)
 
                 if has_val_data:
@@ -442,8 +452,9 @@ class ModuleTrainer(object):
         predict_helper = _get_helper(self, num_inputs, num_targets=0)
         pred_forward_fn = predict_helper.get_partial_forward_fn(self.model)
         
+        loader_iter = iter(loader)
         for batch_idx in range(num_batches):
-            input_batch, _ = predict_helper.grab_batch_from_loader(loader, volatile=True)
+            input_batch, _ = predict_helper.grab_batch_from_loader(loader_iter, volatile=True)
             output_batch = pred_forward_fn(input_batch)
 
             if batch_idx == 0:
@@ -472,7 +483,7 @@ class ModuleTrainer(object):
         num_batches = int(math.ceil(len_inputs / batch_size))
 
         evaluate_helper = _get_helper(self, num_inputs, num_targets)
-        eval_loss_fn = evaluate_helper.get_partial_loss_fn(self._loss_fn)
+        eval_loss_fn = evaluate_helper.get_partial_loss_fn(self._loss_fn, self._loss_weights)
         eval_forward_fn = evaluate_helper.get_partial_forward_fn(self.model)
         eval_logs= {'val_loss': 0.}
         
@@ -489,10 +500,12 @@ class ModuleTrainer(object):
 
             self._optimizer.zero_grad()
             output_batch = eval_forward_fn(input_batch)
-            loss = eval_loss_fn(output_batch, target_batch)
+            loss, losses = eval_loss_fn(output_batch, target_batch)
             
             samples_seen += batch_size
             eval_logs['val_loss'] = (samples_seen*eval_logs['val_loss'] + loss.data[0]*batch_size) / (samples_seen+batch_size)
+            for i, loss_i in enumerate(losses):
+                eval_logs['val_loss_' + str(i)] = (samples_seen*eval_logs.get('val_loss_' + str(i), 0.) + loss_i.data[0]*batch_size) / (samples_seen+batch_size)
             
             if self._has_metrics:
                 metrics_logs = metric_container(output_batch, target_batch)
@@ -589,6 +602,10 @@ class ModuleTrainer(object):
             h.remove()
 
         return summary
+        
+    def adjust_learning_rate(self, lr):
+        for param_group in self._optimizer.param_groups:
+            param_group['lr'] = lr
 
 
 def _get_helper(trainer, num_inputs, num_targets):
@@ -652,8 +669,8 @@ class SingleInput_SingleTarget_Helper(object):
     def get_partial_forward_fn(self, model):
         return functools.partial(self.forward_pass, model=model)
     def calculate_loss(self, output_batch, target_batch, loss_fn):
-        return loss_fn(output_batch, target_batch)
-    def get_partial_loss_fn(self, loss_fn):
+        return loss_fn(output_batch, target_batch), []
+    def get_partial_loss_fn(self, loss_fn, loss_weights):
         return functools.partial(self.calculate_loss, loss_fn=loss_fn)
         #def new_loss_fn(output_batch, target_batch):
         #    return self.calculate_loss(output_batch, target_batch, loss_fn)
@@ -686,11 +703,12 @@ class SingleInput_MultiTarget_Helper(object):
         return model(input_batch)
     def get_partial_forward_fn(self, model):
         return functools.partial(self.forward_pass, model=model)
-    def calculate_loss(self, output_batch, target_batch, loss_fn):
-        return sum([loss_fn[idx](output_batch[idx], target_batch[idx]) 
-                    for idx in range(len(output_batch))])
-    def get_partial_loss_fn(self, loss_fn):
-        return functools.partial(self.calculate_loss, loss_fn=loss_fn)
+    def calculate_loss(self, output_batch, target_batch, loss_fn, loss_weights):
+        losses = [loss_fn[idx](output_batch[idx], target_batch[idx]) 
+                    for idx in range(len(output_batch))]
+        return sum([loss * weight for loss, weight in zip(losses, loss_weights)]), losses
+    def get_partial_loss_fn(self, loss_fn, loss_weights):
+        return functools.partial(self.calculate_loss, loss_fn=loss_fn, loss_weights=loss_weights)
 
 class MultiInput_SingleTarget_Helper(object):
     def move_to_cuda(self, cuda_device, inputs, targets):
@@ -719,8 +737,8 @@ class MultiInput_SingleTarget_Helper(object):
     def get_partial_forward_fn(self, model):
         return functools.partial(self.forward_pass, model=model)
     def calculate_loss(self, output_batch, target_batch, loss_fn):
-        return loss_fn(output_batch, target_batch)
-    def get_partial_loss_fn(self, loss_fn):
+        return loss_fn(output_batch, target_batch), []
+    def get_partial_loss_fn(self, loss_fn, loss_weights):
         return functools.partial(self.calculate_loss, loss_fn=loss_fn)
 
 class MultiInput_MultiTarget_Helper(object):
@@ -750,11 +768,12 @@ class MultiInput_MultiTarget_Helper(object):
         return model(*input_batch)
     def get_partial_forward_fn(self, model):
         return functools.partial(self.forward_pass, model=model)
-    def calculate_loss(self, output_batch, target_batch, loss_fn):
-        return sum([loss_fn[idx](output_batch[idx], target_batch[idx]) 
-                    for idx in range(len(output_batch))])
-    def get_partial_loss_fn(self, loss_fn):
-        return functools.partial(self.calculate_loss, loss_fn=loss_fn)
+    def calculate_loss(self, output_batch, target_batch, loss_fn, loss_weights):
+        losses = [loss_fn[idx](output_batch[idx], target_batch[idx]) 
+                    for idx in range(len(output_batch))]
+        return sum([loss * weight for loss, weight in zip(losses, loss_weights)]), losses
+    def get_partial_loss_fn(self, loss_fn, loss_weights):
+        return functools.partial(self.calculate_loss, loss_fn=loss_fn, loss_weights=loss_weights)
 
 class SingleInput_NoTarget_Helper(object):
     def move_to_cuda(self, cuda_device, inputs, targets=None):
@@ -768,7 +787,7 @@ class SingleInput_NoTarget_Helper(object):
         input_batch = Variable(inputs[batch_idx*batch_size:(batch_idx+1)*batch_size], volatile=volatile)
         return input_batch, None
     def grab_batch_from_loader(self, loader_iter, volatile=False):
-        input_batch = next(loader_iter)
+        input_batch, _ = next(loader_iter)
         return Variable(input_batch, volatile=volatile), None
     def apply_transforms(self, tforms, input_batch, target_batch=None):
         input_batch = tforms[0](input_batch)
@@ -778,8 +797,8 @@ class SingleInput_NoTarget_Helper(object):
     def get_partial_forward_fn(self, model):
         return functools.partial(self.forward_pass, model=model)
     def calculate_loss(self, output_batch, target_batch, loss_fn):
-        return loss_fn(output_batch)
-    def get_partial_loss_fn(self, loss_fn):
+        return loss_fn(output_batch), []
+    def get_partial_loss_fn(self, loss_fn, loss_weights):
         return functools.partial(self.calculate_loss, loss_fn=loss_fn)
 
 class MultiInput_NoTarget_Helper(object):
@@ -805,6 +824,6 @@ class MultiInput_NoTarget_Helper(object):
     def get_partial_forward_fn(self, model):
         return functools.partial(self.forward_pass, model=model)
     def calculate_loss(self, output_batch, target_batch, loss_fn):
-        return loss_fn(output_batch)
-    def get_partial_loss_fn(self, loss_fn):
+        return loss_fn(output_batch), []
+    def get_partial_loss_fn(self, loss_fn, loss_weights):
         return functools.partial(self.calculate_loss, loss_fn=loss_fn)

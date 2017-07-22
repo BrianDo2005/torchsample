@@ -25,10 +25,15 @@ class MetricContainer(object):
 
     def __call__(self, output_batch, target_batch):
         logs = {}
-        for metric in self.metrics:
-            logs[self.prefix+metric._name] = self.helper.calculate_loss(output_batch,
-                                                                        target_batch,
-                                                                        metric) 
+        # TODO make this prettier
+        if not isinstance(output_batch, list) and not isinstance(output_batch, tuple):
+            output_batch = [output_batch]
+        if not isinstance(target_batch, list) and not isinstance(target_batch, tuple):
+            target_batch = [target_batch]
+        
+        for metric, output, target in zip(self.metrics, output_batch, target_batch):
+            if not isinstance(metric, EmptyMetric):
+                logs[self.prefix + metric._name] = metric(output, target) 
         return logs
 
 class Metric(object):
@@ -46,6 +51,16 @@ class MetricCallback(Callback):
         self.container = container
     def on_epoch_begin(self, epoch_idx, logs):
         self.container.reset()
+
+
+class EmptyMetric(Metric):
+    
+    def __call__(self, y_pred, y_true):
+        raise NotImplementedError('Custom Metrics must implement this function')
+        
+    def reset(self):
+        pass
+
 
 class CategoricalAccuracy(Metric):
 
